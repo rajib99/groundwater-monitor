@@ -13,5 +13,10 @@ class Settings(BaseSettings):
 
     backend_cors_origins: list[str] = ["http://localhost:3000"]
 
+    ml_model_path:      str = "/app/models/anomaly_detector.pkl"
+    forecast_model_dir: str = "/app/models"
+
+    anthropic_api_key: str = ""
+
 
 settings = Settings()

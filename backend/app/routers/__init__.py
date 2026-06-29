@@ -1,4 +1,7 @@
-from app.routers.readings import router as readings_router
-from app.routers.sensors import router as sensors_router
+from app.routers.dashboard import router as dashboard_router
+from app.routers.ingest import router as ingest_router
+from app.routers.ml import router as ml_router
+from app.routers.sites import router as sites_router
+from app.routers.websocket import router as ws_router
 
-__all__ = ["sensors_router", "readings_router"]
+__all__ = ["sites_router", "ingest_router", "dashboard_router", "ws_router", "ml_router"]
