@@ -1,0 +1,269 @@
+# Production deployment — uses pre-built images from GHCR.
+# Required env vars (set in .env on the server):
+#   REGISTRY, IMAGE_TAG, DOMAIN,
+#   POSTGRES_DB, POSTGRES_USER, POSTGRES_PASSWORD,
+#   SECRET_KEY, ANTHROPIC_API_KEY,
+#   BACKEND_CORS_ORIGINS
+#
+# First-time setup: see scripts/first-deploy.sh
+
+name: groundwater-monitor
+
+x-backend-image:  &backend-image  ${REGISTRY:-ghcr.io/alexzordel}/gwm-backend:${IMAGE_TAG:-latest}
+x-frontend-image: &frontend-image ${REGISTRY:-ghcr.io/alexzordel}/gwm-frontend:${IMAGE_TAG:-latest}
+x-ml-image:       &ml-image       ${REGISTRY:-ghcr.io/alexzordel}/gwm-ml:${IMAGE_TAG:-latest}
+x-sim-image:      &sim-image      ${REGISTRY:-ghcr.io/alexzordel}/gwm-simulator:${IMAGE_TAG:-latest}
+
+# Shared env injected into every backend-family container
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  REDIS_URL: redis://redis:6379/0
+  SECRET_KEY: ${SECRET_KEY}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  ENVIRONMENT: production
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-https://${DOMAIN}}
+  REPORTS_DIR: /app/reports
+
+services:
+
+  # ── Init: run Alembic migrations before backend starts ────────────────────
+  migrate:
+    image: *backend-image
+    container_name: gwm-migrate
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    environment:
+      <<: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [gwm_net]
+
+  # ── FastAPI backend ────────────────────────────────────────────────────────
+  backend:
+    image: *backend-image
+    container_name: gwm-backend
+    restart: unless-stopped
+    environment:
+      <<: *backend-env
+    volumes:
+      - ml_models:/app/models
+      - reports_data:/app/reports
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks: [gwm_net]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          memory: 256m
+
+  # ── Next.js frontend ───────────────────────────────────────────────────────
+  frontend:
+    image: *frontend-image
+    container_name: gwm-frontend
+    restart: unless-stopped
+    environment:
+      # NEXT_PUBLIC_API_URL is baked at build time; this value is used by the
+      # server-side rewrites() proxy for SSR requests.
+      NEXT_PUBLIC_API_URL: http://backend:8000
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [gwm_net]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+        reservations:
+          memory: 128m
+
+  # ── Nginx reverse proxy ────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: gwm-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/templates:/etc/nginx/templates:ro
+      - certbot_webroot:/var/www/certbot:ro
+      - certbot_certs:/etc/letsencrypt:ro
+    environment:
+      DOMAIN: ${DOMAIN}
+      # Restrict envsubst to only our variables — prevents nginx $vars from
+      # being clobbered (e.g. $host, $uri, $remote_addr).
+      NGINX_ENVSUBST_TEMPLATE_VARS: DOMAIN
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    networks: [gwm_net]
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+
+  # ── Certbot: automatic SSL certificate renewal ────────────────────────────
+  certbot:
+    image: certbot/certbot:latest
+    container_name: gwm-certbot
+    restart: unless-stopped
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_webroot:/var/www/certbot
+    # Attempt renewal every 12 h; certbot skips if cert is not yet due
+    entrypoint: >
+      /bin/sh -c "trap exit TERM;
+      while :; do
+        certbot renew --webroot -w /var/www/certbot --quiet --no-eff-email;
+        sleep 12h & wait $${!};
+      done"
+    depends_on:
+      - nginx
+
+  # ── TimescaleDB (PostgreSQL + time-series extension) ─────────────────────
+  postgres:
+    image: timescale/timescaledb:latest-pg16
+    container_name: gwm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Tune for a typical 2–4 GB VPS
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    command: >
+      postgres
+        -c shared_buffers=256MB
+        -c effective_cache_size=768MB
+        -c maintenance_work_mem=64MB
+        -c checkpoint_completion_target=0.9
+        -c wal_buffers=16MB
+        -c default_statistics_target=100
+        -c random_page_cost=1.1
+        -c work_mem=8MB
+        -c max_connections=100
+        -c log_min_duration_statement=1000
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks: [gwm_net]
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+        reservations:
+          memory: 256m
+
+  # ── Redis (caching + pub-sub) ─────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: gwm-redis
+    restart: unless-stopped
+    # appendonly yes: write durability; save 60 1: snapshot every 60s if 1+ key changed
+    command: >
+      redis-server
+        --appendonly yes
+        --appendfsync everysec
+        --save 60 1
+        --maxmemory 256mb
+        --maxmemory-policy allkeys-lru
+        --loglevel warning
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks: [gwm_net]
+    deploy:
+      resources:
+        limits:
+          memory: 384m
+
+  # ── Live feed simulator ────────────────────────────────────────────────────
+  simulator:
+    image: *sim-image
+    container_name: gwm-simulator
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      API_URL: http://backend:8000
+      SIMULATOR_INTERVAL_S: ${SIMULATOR_INTERVAL_S:-30}
+      ANOMALY_PROB: ${ANOMALY_PROB:-0.05}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    networks: [gwm_net]
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  # ── ML model training (opt-in: --profile ml-train) ────────────────────────
+  # Run manually after sufficient data is collected:
+  #   docker compose -f docker-compose.prod.yml --profile ml-train run --rm ml-train
+  ml-train:
+    image: *ml-image
+    container_name: gwm-ml-train
+    restart: "no"
+    profiles: ["ml-train"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      REDIS_URL: redis://redis:6379/0
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ml_models:/app/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [gwm_net]
+    deploy:
+      resources:
+        limits:
+          memory: 2g   # training can be memory-intensive
+
+volumes:
+  postgres_data:
+  redis_data:
+  ml_models:
+  reports_data:
+  certbot_certs:
+  certbot_webroot:
+
+networks:
+  gwm_net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

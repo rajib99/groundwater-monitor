@@ -1,48 +1,105 @@
+# Development / local docker-compose.
+# Start everything with a single command:
+#
+#   cp .env.example .env   # fill in values
+#   docker-compose up --build
+#
+# The stack boots in order:
+#   postgres + redis  →  migrate  →  seed  →  backend  →  frontend + simulator
+
+name: groundwater-monitor
+
+# The backend image is built once and reused by migrate / seed / backend.
+x-backend-build: &backend-build
+  build:
+    context: ./backend
+    dockerfile: ../docker/Dockerfile.backend
+  image: gwm-backend:local
+
+# Env injected into every backend-family container
+x-backend-env: &backend-env
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+  REDIS_URL: redis://redis:6379/0
+  SECRET_KEY: ${SECRET_KEY:-dev-secret-change-me}
+  ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  BACKEND_CORS_ORIGINS: ${BACKEND_CORS_ORIGINS:-http://localhost:3000}
+  API_KEYS: ${API_KEYS:-}
+
 services:
 
-  # ── FastAPI backend ──────────────────────────────────────────────────────────
+  # ── Init 1: run Alembic migrations ────────────────────────────────────────
+  migrate:
+    <<: *backend-build
+    container_name: gwm-migrate
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    environment:
+      <<: *backend-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [internal]
+
+  # ── Init 2: seed default sites (no-op if already populated) ───────────────
+  seed:
+    <<: *backend-build
+    container_name: gwm-seed
+    command: ["python", "seed.py"]
+    restart: "no"
+    environment:
+      <<: *backend-env
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks: [internal]
+
+  # ── FastAPI backend ────────────────────────────────────────────────────────
   backend:
-    build:
-      context: ./backend
-      dockerfile: ../docker/Dockerfile.backend
+    <<: *backend-build
     container_name: gwm-backend
     restart: unless-stopped
-    env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      REDIS_URL: redis://redis:6379/0
+      <<: *backend-env
     volumes:
+      - ml_models:/app/models
       - reports_data:/app/reports
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
-      postgres:
-        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
-    networks:
-      - internal
-      - web
+    networks: [internal]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
-  # ── Next.js frontend ─────────────────────────────────────────────────────────
+  # ── Next.js frontend ───────────────────────────────────────────────────────
   frontend:
     build:
       context: ./frontend
       dockerfile: ../docker/Dockerfile.frontend
       args:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    image: gwm-frontend:local
     container_name: gwm-frontend
     restart: unless-stopped
-    env_file: .env
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
     ports:
       - "127.0.0.1:3000:3000"
     depends_on:
-      - backend
-    networks:
-      - internal
-      - web
+      backend:
+        condition: service_healthy
+    networks: [internal]
 
-  # ── TimescaleDB (PostgreSQL + time-series extension) ─────────────────────────
+  # ── TimescaleDB (PostgreSQL + time-series extension) ─────────────────────
   postgres:
     image: timescale/timescaledb:latest-pg16
     container_name: gwm-postgres
@@ -61,15 +118,14 @@ services:
       timeout: 5s
       retries: 5
       start_period: 20s
-    networks:
-      - internal
+    networks: [internal]
 
-  # ── Redis (caching + task queue) ─────────────────────────────────────────────
+  # ── Redis (caching + rate limiting + pub-sub) ─────────────────────────────
   redis:
     image: redis:7-alpine
     container_name: gwm-redis
     restart: unless-stopped
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --loglevel warning
     volumes:
       - redis_data:/data
     ports:
@@ -79,39 +135,35 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-    networks:
-      - internal
+    networks: [internal]
 
-  # ── Live feed simulator ──────────────────────────────────────────────────────
+  # ── Live feed simulator ────────────────────────────────────────────────────
   simulator:
     build:
       context: ./ml
       dockerfile: ../docker/Dockerfile.simulator
     container_name: gwm-simulator
     restart: unless-stopped
-    env_file: .env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       API_URL: http://backend:8000
-      SIMULATOR_INTERVAL_S: "30"
-      ANOMALY_PROB: "0.05"
-      LOG_LEVEL: "INFO"
+      API_KEY: ${API_KEYS:-}          # pass first key (or empty if auth disabled)
+      SIMULATOR_INTERVAL_S: ${SIMULATOR_INTERVAL_S:-30}
+      ANOMALY_PROB: ${ANOMALY_PROB:-0.05}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     depends_on:
-      postgres:
-        condition: service_healthy
       backend:
-        condition: service_started
-    networks:
-      - internal
+        condition: service_healthy
+    networks: [internal]
 
-  # ── ML worker (runs on demand / scheduled) ───────────────────────────────────
+  # ── ML worker (on-demand; run via: docker-compose run --rm ml) ───────────
   ml:
     build:
       context: ./ml
       dockerfile: ../docker/Dockerfile.ml
     container_name: gwm-ml
-    restart: unless-stopped
-    env_file: .env
+    restart: "no"
+    profiles: ["ml"]
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
@@ -120,8 +172,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    networks:
-      - internal
+    networks: [internal]
 
 volumes:
   postgres_data:
@@ -132,5 +183,3 @@ volumes:
 networks:
   internal:
     driver: bridge
-  web:
-    external: true

@@ -1,8 +1,9 @@
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
+from app.dependencies.auth import verify_ws_api_key
 from app.ws import manager
 
 logger = logging.getLogger(__name__)
@@ -16,6 +17,7 @@ async def live_feed(
         None,
         description="Subscribe to a single site; omit to receive all sites",
     ),
+    _auth: None = Depends(verify_ws_api_key),
 ) -> None:
     """
     Real-time sensor data stream.
