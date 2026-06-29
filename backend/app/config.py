@@ -15,6 +15,7 @@ class Settings(BaseSettings):
 
     ml_model_path:      str = "/app/models/anomaly_detector.pkl"
     forecast_model_dir: str = "/app/models"
+    reports_dir:        str = "/app/reports"
 
     anthropic_api_key: str = ""
 

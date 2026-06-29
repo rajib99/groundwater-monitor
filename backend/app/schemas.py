@@ -183,6 +183,25 @@ class AISummaryResponse(BaseModel):
     cache_ttl_s:  int  = Field(900, description="Cache TTL in seconds")
 
 
+# ── Reports ──────────────────────────────────────────────────────────────────
+
+class ReportRequest(BaseModel):
+    start: datetime = Field(..., description="Report period start (ISO 8601, inclusive)")
+    end:   datetime = Field(..., description="Report period end (ISO 8601, inclusive)")
+
+
+class ReportResponse(BaseModel):
+    site_id:           int
+    site_name:         str
+    filename:          str
+    report_url:        str  = Field(..., description="Relative URL to download the PDF")
+    generated_at:      datetime
+    date_range_start:  datetime
+    date_range_end:    datetime
+    reading_count:     int
+    alert_count:       int
+
+
 # ── WebSocket messages ────────────────────────────────────────────────────────
 
 class LiveReadingMessage(BaseModel):

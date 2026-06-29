@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.database import engine
-from app.routers import dashboard_router, ingest_router, ml_router, sites_router, ws_router
+from app.routers import dashboard_router, ingest_router, ml_router, reports_router, sites_router, ws_router
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,7 @@ app.include_router(sites_router,     prefix=_API)   # /api/sites/...
 app.include_router(ingest_router,    prefix=_API)   # /api/ingest
 app.include_router(dashboard_router, prefix=_API)   # /api/dashboard/...
 app.include_router(ml_router,        prefix=_API)   # /api/ml/...
+app.include_router(reports_router,   prefix=_API)   # /api/sites/{id}/report
 app.include_router(ws_router)                       # /ws/live-feed  (no /api prefix)
 
 # ── Health check ──────────────────────────────────────────────────────────────

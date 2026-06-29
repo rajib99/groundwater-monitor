@@ -17,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 import anthropic
+import numpy as np
+import pandas as pd
 from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -293,3 +295,107 @@ async def get_ai_summary(
 
     await _set_cached(site.id, summary)
     return summary
+
+
+# ── Report executive summary (no cache, longer prose) ────────────────────────
+
+_REPORT_SYSTEM = """\
+You are a senior groundwater engineer writing the executive summary section of \
+a formal technical report for a UAE construction site. Write a single paragraph \
+of 4–6 sentences (100–140 words) in professional report language.
+
+Cover: overall site condition over the reporting period, notable sensor trends \
+(reference specific numbers), anomaly count and any critical events, pump health \
+trajectory, and a clear operational recommendation.
+
+Do NOT use bullet points, headings, or markdown. Plain prose only. Past tense \
+where describing the reporting period; present tense for recommendations.\
+"""
+
+
+async def get_report_summary(
+    *,
+    site_name: str,
+    site_location: str | None,
+    readings_df: pd.DataFrame,
+    alerts: list[dict],
+    health_scores: list[dict],
+    date_range_start: datetime,
+    date_range_end: datetime,
+) -> str:
+    """Generate a formal executive summary for the PDF report.
+
+    Unlike ``get_ai_summary`` this is not cached — each report gets a fresh
+    summary tailored to its exact date range and statistics.
+    """
+    if not settings.anthropic_api_key:
+        return (
+            "AI executive summary is unavailable because ANTHROPIC_API_KEY is "
+            "not configured on this server."
+        )
+
+    fmt = lambda d: d.strftime("%d %b %Y %H:%M UTC")
+    parts: list[str] = [
+        f"SITE: {site_name}",
+        f"LOCATION: {site_location or 'Not specified'}",
+        f"REPORT PERIOD: {fmt(date_range_start)} — {fmt(date_range_end)}",
+        "",
+        "=== SENSOR STATISTICS (period-wide) ===",
+    ]
+
+    _sensor_cols = [
+        ("water_level_m",      "Water level",    "m"),
+        ("flow_rate_lpm",      "Flow rate",      "L/min"),
+        ("pump_pressure_bar",  "Pump pressure",  "bar"),
+        ("turbidity_ntu",      "Turbidity",      "NTU"),
+        ("conductivity_us_cm", "Conductivity",   "µS/cm"),
+        ("temperature_c",      "Temperature",    "°C"),
+    ]
+    if not readings_df.empty:
+        for col, label, unit in _sensor_cols:
+            if col in readings_df.columns and readings_df[col].notna().any():
+                ser = readings_df[col].dropna()
+                parts.append(
+                    f"{label}: mean={ser.mean():.3f} {unit}, "
+                    f"min={ser.min():.3f}, max={ser.max():.3f}, "
+                    f"readings={len(ser)}"
+                )
+    else:
+        parts.append("No sensor readings available for this period.")
+
+    active = [a for a in alerts if not a.get("resolved_at")]
+    critical = [a for a in alerts if a.get("severity") == "critical"]
+    parts += [
+        "",
+        "=== ALERT SUMMARY ===",
+        f"Total alerts: {len(alerts)}, active (unresolved): {len(active)}, critical: {len(critical)}",
+    ]
+    for a in sorted(alerts, key=lambda x: x.get("severity", ""))[:5]:
+        parts.append(f"  [{a['severity'].upper()}] {a.get('alert_type', '')} — {a.get('message', '')}")
+
+    health_vals = [h["score"] for h in health_scores if h.get("score") is not None]
+    if health_vals:
+        parts += [
+            "",
+            "=== PUMP HEALTH ===",
+            f"mean={np.mean(health_vals):.1f}, min={min(health_vals):.1f}, "
+            f"max={max(health_vals):.1f}, latest={health_vals[-1]:.1f}",
+        ]
+
+    parts += ["", "Write the executive summary paragraph now."]
+
+    try:
+        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
+        msg = await client.messages.create(
+            model=_MODEL,
+            max_tokens=400,
+            system=_REPORT_SYSTEM,
+            messages=[{"role": "user", "content": "\n".join(parts)}],
+        )
+        return msg.content[0].text.strip()
+    except Exception as exc:
+        logger.warning("Claude report summary failed: %s", exc)
+        return (
+            "The AI-generated executive summary could not be produced at this "
+            "time. Please review the data tables and chart in this report."
+        )

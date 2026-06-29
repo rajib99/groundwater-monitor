@@ -11,7 +11,9 @@ RUN uv venv /venv && \
 
 FROM python:${PYTHON_VERSION}-slim AS runtime
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        fonts-liberation \
     && rm -rf /var/lib/apt/lists/* \
     && groupadd --system --gid 1001 appuser \
     && useradd  --system --uid 1001 --gid 1001 --no-create-home appuser

@@ -11,6 +11,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       REDIS_URL: redis://redis:6379/0
+    volumes:
+      - reports_data:/app/reports
     ports:
       - "127.0.0.1:8000:8000"
     depends_on:
@@ -80,6 +82,28 @@ services:
     networks:
       - internal
 
+  # ── Live feed simulator ──────────────────────────────────────────────────────
+  simulator:
+    build:
+      context: ./ml
+      dockerfile: ../docker/Dockerfile.simulator
+    container_name: gwm-simulator
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      API_URL: http://backend:8000
+      SIMULATOR_INTERVAL_S: "30"
+      ANOMALY_PROB: "0.05"
+      LOG_LEVEL: "INFO"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    networks:
+      - internal
+
   # ── ML worker (runs on demand / scheduled) ───────────────────────────────────
   ml:
     build:
@@ -103,6 +127,7 @@ volumes:
   postgres_data:
   redis_data:
   ml_models:
+  reports_data:
 
 networks:
   internal:
