@@ -1,4 +1,4 @@
-name: Build & Deploy
+name: Deploy
 
 on:
   push:
@@ -10,21 +10,41 @@ on:
         type: boolean
         default: false
 
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 env:
-  REGISTRY: ghcr.io/${{ github.repository_owner }}
+  REGISTRY: ${{ secrets.DOCKERHUB_USERNAME }}
+  DEPLOY_DIR: /srv/apps/groundwater-monitor
 
 jobs:
-  # ── Job 1: build all service images ───────────────────────────────────────
-  build:
-    name: Build ${{ matrix.service }}
-    if: ${{ !inputs.skip_build }}
+  # ── Job 1: compute SHA once so all matrix jobs share the same tag ────────────
+  prepare:
+    name: Prepare
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    outputs:
+      short-sha: ${{ steps.sha.outputs.short }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute short SHA
+        id: sha
+        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+  # ── Job 2: build all four service images in parallel ─────────────────────────
+  build:
+    name: Build & Push ${{ matrix.service }}
+    if: ${{ !inputs.skip_build }}
+    needs: prepare
+    runs-on: ubuntu-latest
 
     strategy:
-      fail-fast: false   # build all images even if one fails
+      fail-fast: false   # push all images even if one fails
       matrix:
         include:
           - service:    backend
@@ -35,7 +55,6 @@ jobs:
           - service:    frontend
             context:    ./frontend
             dockerfile: ./docker/Dockerfile.frontend
-            # API URL used by server-side rewrites inside the container
             build-args: NEXT_PUBLIC_API_URL=http://backend:8000
 
           - service:    simulator
@@ -52,15 +71,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract metadata
         id: meta
@@ -68,8 +86,8 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/gwm-${{ matrix.service }}
           tags: |
-            type=sha,format=long,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
+            type=sha,prefix=sha-,format=short
 
       - name: Build and push ${{ matrix.service }}
         uses: docker/build-push-action@v6
@@ -80,89 +98,80 @@ jobs:
           build-args: ${{ matrix.build-args }}
           tags:       ${{ steps.meta.outputs.tags }}
           labels:     ${{ steps.meta.outputs.labels }}
-          # Per-service cache buckets so services don't share a cache
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to:   type=gha,mode=max,scope=${{ matrix.service }}
 
-  # ── Job 2: deploy to Hetzner VPS ──────────────────────────────────────────
+  # ── Job 3: deploy to VPS ─────────────────────────────────────────────────────
   deploy:
-    name: Deploy to production
-    needs: [build]
-    # Allow deploy even if build was skipped (manual re-deploy)
-    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    name: Deploy to VPS
     runs-on: ubuntu-latest
-    environment: production   # requires manual approval if configured in GitHub
-
-    concurrency:
-      group: production-deploy
-      cancel-in-progress: false   # never cancel an in-progress deploy
+    needs: [prepare, build]
+    # Run deploy even when build was skipped (manual re-deploy via workflow_dispatch)
+    if: always() && (needs.build.result == 'success' || needs.build.result == 'skipped')
+    environment: production
 
     steps:
-      - name: Checkout (for compose file)
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Deploy via SSH
-        uses: appleboy/ssh-action@v1.2.0
-        env:
-          IMAGE_SHA: ${{ github.sha }}
-          REGISTRY:  ${{ env.REGISTRY }}
+      - name: Copy compose file and nginx config to VPS
+        uses: appleboy/scp-action@v0.1.7
         with:
-          host:     ${{ secrets.HETZNER_HOST }}
-          username: ${{ secrets.HETZNER_USER }}
-          key:      ${{ secrets.HETZNER_SSH_KEY }}
-          port:     ${{ secrets.HETZNER_PORT || 22 }}
-          envs:     IMAGE_SHA,REGISTRY
+          host:     ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key:      ${{ secrets.VPS_SSH_KEY }}
+          source:   "docker-compose.prod.yml,nginx/"
+          target:   ${{ env.DEPLOY_DIR }}
+
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host:         ${{ secrets.VPS_HOST }}
+          username:     ${{ secrets.VPS_USER }}
+          key:          ${{ secrets.VPS_SSH_KEY }}
+          script_stop:  true
           script: |
             set -euo pipefail
 
-            DEPLOY_DIR=/opt/groundwater-monitor
-            COMPOSE="docker compose -f $DEPLOY_DIR/docker-compose.prod.yml"
+            cd "${{ env.DEPLOY_DIR }}"
 
-            echo "==> Pulling latest config from git"
-            cd "$DEPLOY_DIR"
-            git fetch --depth=1 origin main
-            git reset --hard origin/main
+            export REGISTRY="${{ env.REGISTRY }}"
+            export IMAGE_TAG="sha-${{ needs.prepare.outputs.short-sha }}"
 
-            echo "==> Updating image tag to ${IMAGE_SHA}"
-            # Update IMAGE_TAG in .env; create the line if it doesn't exist
-            if grep -q '^IMAGE_TAG=' .env; then
-              sed -i "s|^IMAGE_TAG=.*|IMAGE_TAG=${IMAGE_SHA}|" .env
-            else
-              echo "IMAGE_TAG=${IMAGE_SHA}" >> .env
-            fi
+            COMPOSE="docker compose -f docker-compose.prod.yml"
 
-            echo "==> Logging in to GHCR"
-            echo "${{ secrets.GHCR_PAT }}" \
-              | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-
-            echo "==> Pulling new images"
+            echo "▶ Pulling $REGISTRY/gwm-*:$IMAGE_TAG"
             $COMPOSE pull --quiet
 
-            echo "==> Running database migrations"
+            echo "▶ Running database migrations"
             $COMPOSE run --rm migrate
 
-            echo "==> Restarting services"
+            echo "▶ Bringing up services"
             $COMPOSE up -d --remove-orphans --wait --wait-timeout 120
 
-            echo "==> Verifying health"
+            echo "▶ Health status"
             docker inspect --format='{{.Name}}: {{.State.Health.Status}}' \
               gwm-backend gwm-frontend 2>/dev/null || true
 
-            echo "==> Pruning old images (>24h)"
+            echo "▶ Pruning old images (>24 h)"
             docker image prune -f --filter "until=24h"
 
-            echo "==> Deploy complete: ${IMAGE_SHA}"
+            echo "✓ Deploy complete: $IMAGE_TAG"
 
-  # ── Job 3: notify on failure ──────────────────────────────────────────────
-  notify-failure:
-    name: Notify on failure
-    needs: [build, deploy]
-    if: failure()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Report failure
+      - name: Write deployment summary
+        if: always()
+        env:
+          SHORT_SHA: ${{ needs.prepare.outputs.short-sha }}
+          JOB_STATUS: ${{ job.status }}
         run: |
-          echo "::error::Deployment failed for commit ${{ github.sha }}"
-          echo "Build:  ${{ needs.build.result }}"
-          echo "Deploy: ${{ needs.deploy.result }}"
-          # Add Slack/email webhook here if desired
+          {
+            echo "## Deployment $( [ "$JOB_STATUS" = "success" ] && echo "✅ succeeded" || echo "❌ failed" )"
+            echo ""
+            echo "| Field | Value |"
+            echo "|---|---|"
+            echo "| **Image tag** | \`sha-${SHORT_SHA}\` |"
+            echo "| **Commit** | [\`${SHORT_SHA}\`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}) |"
+            echo "| **Branch** | \`${{ github.ref_name }}\` |"
+            echo "| **Triggered by** | @${{ github.actor }} |"
+            echo "| **Workflow run** | [#${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) |"
+          } >> "$GITHUB_STEP_SUMMARY"
