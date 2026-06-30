@@ -147,7 +147,21 @@ jobs:
             $COMPOSE run --rm migrate
 
             echo "▶ Bringing up services"
-            $COMPOSE up -d --remove-orphans --wait --wait-timeout 120
+            $COMPOSE up -d --remove-orphans
+
+            echo "▶ Waiting for backend to be healthy"
+            deadline=120
+            elapsed=0
+            until docker inspect --format='{{.State.Health.Status}}' gwm-backend 2>/dev/null | grep -q "healthy"; do
+              if [ "$elapsed" -ge "$deadline" ]; then
+                echo "✗ Backend not healthy after ${deadline}s"
+                docker logs gwm-backend --tail 50
+                exit 1
+              fi
+              sleep 5
+              elapsed=$((elapsed + 5))
+            done
+            echo "✓ Backend healthy after ${elapsed}s"
 
             echo "▶ Health status"
             docker inspect --format='{{.Name}}: {{.State.Health.Status}}' \

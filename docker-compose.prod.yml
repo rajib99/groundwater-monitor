@@ -113,6 +113,7 @@ services:
     environment:
       DATABASE_URL:         postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       API_URL:              http://backend:8000
+      API_KEY:              ${API_KEYS:-}
       SIMULATOR_INTERVAL_S: ${SIMULATOR_INTERVAL_S:-30}
       ANOMALY_PROB:         ${ANOMALY_PROB:-0.05}
       LOG_LEVEL:            ${LOG_LEVEL:-INFO}
