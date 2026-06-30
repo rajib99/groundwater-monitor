@@ -25,7 +25,7 @@ export function useSites() {
 }
 
 export function useDashboard() {
-  return useSWR<DashboardSummary>("/api/dashboard/", fetcher, {
+  return useSWR<DashboardSummary>("/api/dashboard/summary", fetcher, {
     refreshInterval: 30_000,
   });
 }

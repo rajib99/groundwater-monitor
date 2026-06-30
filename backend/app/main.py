@@ -41,6 +41,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Groundwater Monitor API",
     version=_VERSION,
+    redirect_slashes=False,
     description=(
         "Real-time groundwater monitoring for UAE construction sites.\n\n"
         "All `/api/*` endpoints require the `X-API-Key` header when "
