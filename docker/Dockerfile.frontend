@@ -4,7 +4,7 @@ ARG NODE_VERSION=22
 FROM node:${NODE_VERSION}-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+RUN npm ci && npm cache clean --force
 
 # ── Stage 2: build ────────────────────────────────────────────────────────────
 FROM node:${NODE_VERSION}-alpine AS builder
