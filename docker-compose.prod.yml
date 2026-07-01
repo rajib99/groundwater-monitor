@@ -52,8 +52,6 @@ services:
     restart: unless-stopped
     environment:
       NEXT_PUBLIC_API_URL: http://backend:8000
-    ports:
-      - "127.0.0.1:3000:3000"
     depends_on:
       backend:
         condition: service_healthy
@@ -64,6 +62,23 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ── Nginx reverse proxy ────────────────────────────────────────────────────
+  nginx:
+    container_name: gwm-nginx
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:80:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+    depends_on:
+      frontend:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+    networks: [gwm_net]
 
   # ── TimescaleDB ───────────────────────────────────────────────────────────
   postgres:
