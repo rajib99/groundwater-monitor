@@ -1,6 +1,6 @@
 "use client";
 
-import { use, useState, useCallback } from "react";
+import { use, useState, useCallback, useMemo } from "react";
 import Link from "next/link";
 import {
   useSiteLatest,
@@ -21,10 +21,6 @@ import StatusBadge from "@/components/StatusBadge";
 import type { WsStatus } from "@/lib/useWebSocket";
 import type { Reading } from "@/types/api";
 
-function sevenDaysAgo() {
-  return new Date(Date.now() - 7 * 86_400_000).toISOString();
-}
-
 export default function SiteDetailPage({
   params,
 }: {
@@ -35,9 +31,15 @@ export default function SiteDetailPage({
 
   const [wsStatus, setWsStatus] = useState<WsStatus>("disconnected");
 
+  // Memoized so the value (and SWR cache key) stays stable across re-renders
+  const sevenDaysAgo = useMemo(
+    () => new Date(Date.now() - 7 * 86_400_000).toISOString(),
+    []
+  );
+
   const { data: latest } = useSiteLatest(siteId);
   const { data: readings } = useSiteReadings(siteId, {
-    start: sevenDaysAgo(),
+    start: sevenDaysAgo,
     page_size: 1000,
   });
   const { data: alerts } = useSiteAlerts(siteId);
