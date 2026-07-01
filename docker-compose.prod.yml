@@ -60,8 +60,8 @@ services:
       test: ["CMD", "wget", "-qO-", "http://localhost:3000/"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 30s
+      retries: 5
+      start_period: 60s
 
   # ── Nginx reverse proxy ────────────────────────────────────────────────────
   nginx:
@@ -75,7 +75,7 @@ services:
       - ./nginx/conf.d:/etc/nginx/conf.d:ro
     depends_on:
       frontend:
-        condition: service_healthy
+        condition: service_started
       backend:
         condition: service_healthy
     networks: [gwm_net]
