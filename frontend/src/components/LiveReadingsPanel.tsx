@@ -43,13 +43,18 @@ export default function LiveReadingsPanel({
   initialReading,
   onWsStatus,
 }: LiveReadingsPanelProps) {
-  const [reading, setReading] = useState<Reading | null>(initialReading);
+  const [wsReading, setWsReading] = useState<Reading | null>(null);
   const [flash, setFlash] = useState(false);
+
+  // WS reading takes precedence; fall back to the SWR-fetched initial value
+  // so data appears as soon as the REST fetch completes, even before the first
+  // WebSocket message arrives.
+  const reading = wsReading ?? initialReading;
 
   const onReading = useCallback(
     (r: Reading, rid: number) => {
       if (rid !== siteId) return;
-      setReading(r);
+      setWsReading(r);
       setFlash(true);
       setTimeout(() => setFlash(false), 800);
     },
