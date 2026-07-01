@@ -149,6 +149,9 @@ jobs:
             echo "▶ Bringing up services"
             $COMPOSE up -d --remove-orphans
 
+            echo "▶ Restarting nginx to pick up new upstream container IPs"
+            $COMPOSE restart nginx
+
             echo "▶ Waiting for backend to be healthy"
             deadline=120
             elapsed=0
