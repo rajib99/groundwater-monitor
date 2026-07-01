@@ -35,7 +35,7 @@ async def _get_site_or_404(site_id: int, db: AsyncSession) -> Site:
 
 
 @router.get(
-    "/",
+    "",
     response_model=list[SiteResponse],
     summary="List all monitoring sites",
 )

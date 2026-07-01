@@ -1,11 +1,12 @@
 import logging
 import time
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database import get_db
+from app.database import get_db, AsyncSessionLocal
+from app.models.pump_health_score import PumpHealthScore
 from app.models.sensor_reading import SensorReading
 from app.models.site import Site
 from app.redis_client import get_redis
@@ -43,6 +44,33 @@ async def _check_rate_limit(site_id: int) -> None:
         logger.warning("Rate-limit Redis error for site %d: %s", site_id, exc)
 
 
+async def _compute_and_store_health(site_id: int, site_name: str, reading: SensorReading) -> None:
+    """Compute a pump health score from the ML model and persist it. Fail-open."""
+    try:
+        from app.routers.ml import _load_artifact, _get_site_dict, _score_reading
+        artifact  = _load_artifact()
+        site_dict = _get_site_dict(artifact, site_id, site_name)
+        result    = _score_reading(site_dict, {
+            "water_level_m":      reading.water_level_m,
+            "flow_rate_lpm":      reading.flow_rate_lpm,
+            "pump_pressure_bar":  reading.pump_pressure_bar,
+            "turbidity_ntu":      reading.turbidity_ntu,
+            "conductivity_us_cm": reading.conductivity_us_cm,
+        })
+        score = round((1.0 - result["anomaly_score"]) * 100, 2)
+        async with AsyncSessionLocal() as session:
+            session.add(PumpHealthScore(
+                site_id=site_id,
+                timestamp=reading.timestamp,
+                score=score,
+                contributing_factors=result["contributing_features"],
+            ))
+            await session.commit()
+        logger.debug("Health score %.1f stored for site=%d", score, site_id)
+    except Exception as exc:
+        logger.debug("Health score skipped for site=%d: %s", site_id, exc)
+
+
 @router.post(
     "/ingest",
     response_model=ReadingResponse,
@@ -51,6 +79,7 @@ async def _check_rate_limit(site_id: int) -> None:
 )
 async def ingest_reading(
     payload: ReadingCreate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ) -> SensorReading:
     # ── Rate limit (per-site, fail-open when Redis is unavailable) ─────────
@@ -97,5 +126,8 @@ async def ingest_reading(
             },
             site_id=site.id,
         )
+
+    # ── Compute pump health score in background (fail-open) ───────────────
+    background_tasks.add_task(_compute_and_store_health, site.id, site.name, reading)
 
     return reading

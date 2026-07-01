@@ -21,7 +21,7 @@ async function fetcher<T>(url: string): Promise<T> {
 }
 
 export function useSites() {
-  return useSWR<Site[]>("/api/sites/", fetcher, { refreshInterval: 60_000 });
+  return useSWR<Site[]>("/api/sites", fetcher, { refreshInterval: 60_000 });
 }
 
 export function useDashboard() {
