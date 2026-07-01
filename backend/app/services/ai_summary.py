@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import anthropic
+import groq as groq_lib
 import numpy as np
 import pandas as pd
 from sqlalchemy import desc, select
@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 _SUMMARY_TTL_SECONDS = 15 * 60   # 15 minutes
 _READINGS_WINDOW_H   = 6
-_MODEL               = "claude-sonnet-4-6"
+_MODEL               = "llama-3.3-70b-versatile"
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
@@ -218,17 +218,19 @@ def _build_user_prompt(
     return "\n".join(parts)
 
 
-# ── Claude call ───────────────────────────────────────────────────────────────
+# ── Groq call ─────────────────────────────────────────────────────────────────
 
-async def _call_claude(user_prompt: str) -> str:
-    client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-    message = await client.messages.create(
+async def _call_groq(user_prompt: str) -> str:
+    client = groq_lib.AsyncGroq(api_key=settings.groq_api_key)
+    response = await client.chat.completions.create(
         model=_MODEL,
         max_tokens=400,
-        system=_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_prompt}],
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user",   "content": user_prompt},
+        ],
     )
-    return message.content[0].text.strip()
+    return response.choices[0].message.content.strip()
 
 
 # ── Redis cache ───────────────────────────────────────────────────────────────
@@ -287,11 +289,11 @@ async def get_ai_summary(
     user_prompt = _build_user_prompt(site, stats, alerts, forecast)
 
     logger.info(
-        "Calling Claude for site %d (%s): %d readings, %d alerts, forecast=%s",
+        "Calling Groq for site %d (%s): %d readings, %d alerts, forecast=%s",
         site.id, site.name, stats.get("count", 0), len(alerts), forecast is not None,
     )
 
-    summary = await _call_claude(user_prompt)
+    summary = await _call_groq(user_prompt)
 
     await _set_cached(site.id, summary)
     return summary
@@ -328,9 +330,9 @@ async def get_report_summary(
     Unlike ``get_ai_summary`` this is not cached — each report gets a fresh
     summary tailored to its exact date range and statistics.
     """
-    if not settings.anthropic_api_key:
+    if not settings.groq_api_key:
         return (
-            "AI executive summary is unavailable because ANTHROPIC_API_KEY is "
+            "AI executive summary is unavailable because GROQ_API_KEY is "
             "not configured on this server."
         )
 
@@ -385,16 +387,18 @@ async def get_report_summary(
     parts += ["", "Write the executive summary paragraph now."]
 
     try:
-        client = anthropic.AsyncAnthropic(api_key=settings.anthropic_api_key)
-        msg = await client.messages.create(
+        client = groq_lib.AsyncGroq(api_key=settings.groq_api_key)
+        response = await client.chat.completions.create(
             model=_MODEL,
             max_tokens=400,
-            system=_REPORT_SYSTEM,
-            messages=[{"role": "user", "content": "\n".join(parts)}],
+            messages=[
+                {"role": "system", "content": _REPORT_SYSTEM},
+                {"role": "user",   "content": "\n".join(parts)},
+            ],
         )
-        return msg.content[0].text.strip()
+        return response.choices[0].message.content.strip()
     except Exception as exc:
-        logger.warning("Claude report summary failed: %s", exc)
+        logger.warning("Groq report summary failed: %s", exc)
         return (
             "The AI-generated executive summary could not be produced at this "
             "time. Please review the data tables and chart in this report."

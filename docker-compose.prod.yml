@@ -2,7 +2,7 @@ x-backend-env: &backend-env
   DATABASE_URL:          postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
   REDIS_URL:             redis://redis:6379/0
   SECRET_KEY:            ${SECRET_KEY:?SECRET_KEY must be set}
-  ANTHROPIC_API_KEY:     ${ANTHROPIC_API_KEY:-}
+  GROQ_API_KEY:          ${GROQ_API_KEY:-}
   ENVIRONMENT:           production
   LOG_LEVEL:             ${LOG_LEVEL:-INFO}
   BACKEND_CORS_ORIGINS:  ${BACKEND_CORS_ORIGINS:?BACKEND_CORS_ORIGINS must be set}

@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     forecast_model_dir: str = "/app/models"
     reports_dir:        str = "/app/reports"
 
-    anthropic_api_key: str = ""
+    groq_api_key: str = ""
 
     # Comma-separated API keys. Empty string = auth disabled (dev default).
     # Example: API_KEYS=key-abc123,key-xyz789

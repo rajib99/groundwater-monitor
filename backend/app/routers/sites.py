@@ -208,10 +208,10 @@ async def get_ai_summary_endpoint(
     refresh: bool = Query(False, description="Bypass the 15-minute cache and force a fresh summary"),
     db: AsyncSession = Depends(get_db),
 ) -> AISummaryResponse:
-    if not settings.anthropic_api_key:
+    if not settings.groq_api_key:
         raise HTTPException(
             status_code=503,
-            detail="ANTHROPIC_API_KEY is not configured on this server.",
+            detail="GROQ_API_KEY is not configured on this server.",
         )
 
     site = await _get_site_or_404(site_id, db)
