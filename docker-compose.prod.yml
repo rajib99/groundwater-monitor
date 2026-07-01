@@ -120,19 +120,17 @@ services:
       retries: 5
     networks: [gwm_net]
 
-  # ── ML trainer (runs once per deploy, writes model to shared volume) ─────
+  # ── ML trainer (profile: tools — run explicitly, not part of default up) ──
   ml-trainer:
     container_name: gwm-ml-trainer
     image: ${REGISTRY}/gwm-ml:${IMAGE_TAG:-latest}
     command: ["python", "retrain.py", "--output", "/app/models/anomaly_detector.pkl"]
     restart: "no"
+    profiles: ["tools"]
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
     volumes:
       - ml_models:/app/models
-    depends_on:
-      backend:
-        condition: service_healthy
     networks: [gwm_net]
 
   # ── Simulator ─────────────────────────────────────────────────────────────

@@ -163,6 +163,9 @@ jobs:
             done
             echo "✓ Backend healthy after ${elapsed}s"
 
+            echo "▶ Retraining ML model (non-fatal)"
+            $COMPOSE run --rm --profile tools ml-trainer || echo "⚠ ML training failed — skipping"
+
             echo "▶ Health status"
             docker inspect --format='{{.Name}}: {{.State.Health.Status}}' \
               gwm-backend gwm-frontend 2>/dev/null || true
