@@ -16,7 +16,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-import groq as groq_lib
 import numpy as np
 import pandas as pd
 from sqlalchemy import desc, select
@@ -221,6 +220,7 @@ def _build_user_prompt(
 # ── Groq call ─────────────────────────────────────────────────────────────────
 
 async def _call_groq(user_prompt: str) -> str:
+    import groq as groq_lib
     client = groq_lib.AsyncGroq(api_key=settings.groq_api_key)
     response = await client.chat.completions.create(
         model=_MODEL,
@@ -387,6 +387,7 @@ async def get_report_summary(
     parts += ["", "Write the executive summary paragraph now."]
 
     try:
+        import groq as groq_lib
         client = groq_lib.AsyncGroq(api_key=settings.groq_api_key)
         response = await client.chat.completions.create(
             model=_MODEL,
